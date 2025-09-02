@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use chrono_tz::Europe::Paris;
 use meilisearch_sdk::client::Client;
 use meilisearch_sdk::settings::Embedder;
 use meilisearch_sdk::settings::EmbedderSource;
@@ -17,10 +18,14 @@ use dotenv::dotenv;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Face {
+    id: u32,
     name: Option<String>,
-    embedding: Vec<f32>,
+    // Meilisearch expects vectors in a special field `_vectors`.
+    // We map this Rust field `vectors` to `_vectors` on serialize.
+    #[serde(rename = "_vectors")]
+    vectors: HashMap<String, Option<Vec<f32>>>,
     source_url: Option<String>,
-
+    date: Option<String>,
 }
 
 
@@ -66,11 +71,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new("http://localhost:7700", Some(std::env::var("MEILI_MASTER_KEY").unwrap())).unwrap();
     let faces = client.index("faces");
     faces.set_embedders(&HashMap::from([
-        ("default".to_string(), Embedder {
-            source: EmbedderSource::UserProvided,
-            dimensions: Some(512),
-            ..Embedder::default()
-        })
+        (
+            "embedding".to_string(),
+            Embedder {
+                source: EmbedderSource::UserProvided,
+                dimensions: Some(512),
+                ..Embedder::default()
+            },
+        ),
+        (
+            "default".to_string(),
+            Embedder {
+                source: EmbedderSource::UserProvided,
+                dimensions: Some(512),
+                ..Embedder::default()
+            },
+        ),
     ])).await?;
 
     let mut ticker = time::interval(time::Duration::from_millis(995));
@@ -108,11 +124,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let flat = predictions.as_slice().unwrap_or(&[]);
                         let preview_len = flat.len().min(5);
 
-                        let a = faces.add_documents(&[Face {
+                        // Prepare vectors payload expected by Meilisearch
+                        let mut vectors = HashMap::new();
+                        vectors.insert("embedding".to_string(), Some(flat.to_vec()));
+                        vectors.insert("default".to_string(), Some(flat.to_vec()));
+
+                        let _ = faces.add_documents(&[Face {
+                            id: rand::random(),
                             name: None,
-                            embedding: flat.to_vec(),
+                            vectors,
                             source_url: None,
-                        }], Some("embedding")).await?;
+                            date: Some(chrono::Utc::now().with_timezone(&Paris).to_rfc3339()),
+                        }], Some("id")).await?;
                         info!("Embedding preview: {:?} ({} dims)", &flat[..preview_len], flat.len());
                     }
                     Err(e) => {
