@@ -2,38 +2,35 @@ use ndarray::Array4;
 use ort::inputs;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
-use reqwest;
-use tokio::time;
 use tokio::fs;
+use tokio::time;
 use image::{self, imageops::FilterType, DynamicImage};
-use log::{info, error};
-use std::convert::TryInto;
+use log::info;
 
-pub async fn fetch_image(url: &str) -> Result<bytes::Bytes, reqwest::Error> {
-    let response = reqwest::get(url).await?;
+pub async fn fetch_image(client: &reqwest::Client, url: &str) -> Result<bytes::Bytes, reqwest::Error> {
+    let response = client.get(url).send().await?;
     let bytes = response.bytes().await?;
     Ok(bytes)
 }
 
-fn preprocess_nhwc(rgb: DynamicImage) -> Result<Array4<f32>, Box<dyn std::error::Error>> {
-    // 112x112, RGB, f32, NHWC, (x-127.5)/128
-    let rgb = rgb.resize_exact(112, 112, FilterType::Lanczos3).to_rgb8();
-    rgb.save("resized_image.png")?;
+fn preprocess_nhwc(img: DynamicImage) -> Result<Array4<f32>, Box<dyn std::error::Error>> {
+    // Resize quickly, convert to RGB8, then normalize to f32 NHWC: (x-127.5)/128
+    // Triangle is a good balance of speed/quality vs Lanczos3.
+    let rgb = img.resize_exact(112, 112, FilterType::Triangle).to_rgb8();
 
     let (w, h) = rgb.dimensions(); // (112, 112)
-    let mut arr = Array4::<f32>::zeros((1, h as usize, w as usize, 3));
-    for y in 0..h as usize {
-        for x in 0..w as usize {
-            let p = rgb.get_pixel(x as u32, y as u32);
-            // RGB order
-            let r = (p[0] as f32 - 127.5) / 128.0;
-            let g = (p[1] as f32 - 127.5) / 128.0;
-            let b = (p[2] as f32 - 127.5) / 128.0;
-            arr[(0, y, x, 0)] = r;
-            arr[(0, y, x, 1)] = g;
-            arr[(0, y, x, 2)] = b;
-        }
+    let raw = rgb.as_raw(); // &[u8] in RGBRGB...
+    let numel = (h as usize) * (w as usize) * 3;
+    let mut data = vec![0f32; numel];
+    for (i, px) in raw.chunks_exact(3).enumerate() {
+        let base = i * 3;
+        data[base] = (px[0] as f32 - 127.5) / 128.0; // R
+        data[base + 1] = (px[1] as f32 - 127.5) / 128.0; // G
+        data[base + 2] = (px[2] as f32 - 127.5) / 128.0; // B
     }
+
+    // Build the array without an extra zero-initialization pass.
+    let arr = Array4::from_shape_vec((1, h as usize, w as usize, 3), data)?;
     Ok(arr)
 }
 
@@ -49,21 +46,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     let mut ticker = time::interval(time::Duration::from_millis(995));
-    // Download & save the model
+    // Reuse HTTP client for connection pooling
+    let client = reqwest::Client::builder()
+        .pool_idle_timeout(std::time::Duration::from_secs(30))
+        .tcp_nodelay(true)
+        .build()?;
+
+    // Download & cache the model locally if missing
     let model_url = "https://huggingface.co/garavv/arcface-onnx/resolve/main/arc.onnx";
-    let model_bytes = reqwest::get(model_url).await?.bytes().await?;
     let model_path = "model.onnx";
-    fs::write(model_path, &model_bytes).await?;
+    if fs::metadata(model_path).await.is_err() {
+        let model_bytes = client.get(model_url).send().await?.bytes().await?;
+        fs::write(model_path, &model_bytes).await?;
+    }
     let mut model = Session::builder()?
         .with_optimization_level(GraphOptimizationLevel::Level3)?
-        .with_intra_threads(4)?
+        .with_intra_threads(6)?
         .commit_from_file(model_path)?;
     info!("Model loaded successfully {model:?}");
 
     loop {
         ticker.tick().await;
 
-        match fetch_image("https://thispersondoesnotexist.com/").await {
+    match fetch_image(&client, "https://thispersondoesnotexist.com/").await {
             Ok(image_data) => {
                 match image::load_from_memory(&image_data) {
                     Ok(decoded) => {
@@ -71,8 +76,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let input_value = ort::value::Value::from_array(input)?;
                         let outputs = model.run(inputs!["input_1" => input_value])?;
                         let predictions = outputs["embedding"].try_extract_array::<f32>()?;
-
-                        info!("Output {predictions:?}");
+                        // Log only a small slice to avoid large string formatting overhead
+                        let flat = predictions.as_slice().unwrap_or(&[]);
+                        let preview_len = flat.len().min(5);
+                        info!("Embedding preview: {:?} ({} dims)", &flat[..preview_len], flat.len());
                     }
                     Err(e) => {
                         eprintln!("Error decoding image: {e}");
