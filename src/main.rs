@@ -1,11 +1,28 @@
+use std::collections::HashMap;
+
+use meilisearch_sdk::client::Client;
+use meilisearch_sdk::settings::Embedder;
+use meilisearch_sdk::settings::EmbedderSource;
 use ndarray::Array4;
 use ort::inputs;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::fs;
 use tokio::time;
 use image::{self, imageops::FilterType, DynamicImage};
 use log::info;
+use dotenv::dotenv;
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Face {
+    name: Option<String>,
+    embedding: Vec<f32>,
+    source_url: Option<String>,
+
+}
+
 
 pub async fn fetch_image(client: &reqwest::Client, url: &str) -> Result<bytes::Bytes, reqwest::Error> {
     let response = client.get(url).send().await?;
@@ -43,7 +60,18 @@ fn l2_normalize(v: &mut [f32]) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenv().ok();
     env_logger::init();
+
+    let client = Client::new("http://localhost:7700", Some(std::env::var("MEILI_MASTER_KEY").unwrap())).unwrap();
+    let faces = client.index("faces");
+    faces.set_embedders(&HashMap::from([
+        ("default".to_string(), Embedder {
+            source: EmbedderSource::UserProvided,
+            dimensions: Some(512),
+            ..Embedder::default()
+        })
+    ])).await?;
 
     let mut ticker = time::interval(time::Duration::from_millis(995));
     // Reuse HTTP client for connection pooling
@@ -68,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         ticker.tick().await;
 
-    match fetch_image(&client, "https://thispersondoesnotexist.com/").await {
+        match fetch_image(&client, "https://thispersondoesnotexist.com/").await {
             Ok(image_data) => {
                 match image::load_from_memory(&image_data) {
                     Ok(decoded) => {
@@ -79,6 +107,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Log only a small slice to avoid large string formatting overhead
                         let flat = predictions.as_slice().unwrap_or(&[]);
                         let preview_len = flat.len().min(5);
+
+                        let a = faces.add_documents(&[Face {
+                            name: None,
+                            embedding: flat.to_vec(),
+                            source_url: None,
+                        }], Some("embedding")).await?;
                         info!("Embedding preview: {:?} ({} dims)", &flat[..preview_len], flat.len());
                     }
                     Err(e) => {
