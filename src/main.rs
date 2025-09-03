@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
+use actix_web::{web, App, HttpServer};
 use meilisearch_sdk::{settings::{EmbedderSource, Embedder}, client::Client};
 use tokio::fs;
 use dotenv::dotenv;
@@ -53,9 +54,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         imgs_path,
     ).await?);
 
+    let app_state_clone = app_state.clone();
     tokio::spawn(async move {
-        let _ = scraper::scrap(app_state).await;
+        let _ = scraper::scrap(app_state_clone).await;
     });
+
+    HttpServer::new(move || {
+        App::new()
+            .app_data(web::Data::new(app_state.clone()))
+            .service(server::upload)
+            .service(server::search)
+    })
+    .bind(("127.0.0.1", 8080))?
+    .run()
+    .await?;
 
     Ok(())
 }
