@@ -4,3 +4,5 @@ resized_image.png
 .env
 images/
 .DS_Store
+.git/
+.gitignore
