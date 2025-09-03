@@ -2,3 +2,4 @@
 model.onnx
 resized_image.png
 .env
+images/

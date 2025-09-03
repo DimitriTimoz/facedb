@@ -35,13 +35,12 @@ pub async fn fetch_image(client: &reqwest::Client, url: &str) -> Result<bytes::B
     Ok(bytes)
 }
 
-fn preprocess_nhwc(img: DynamicImage) -> Result<Array4<f32>, Box<dyn std::error::Error>> {
+fn preprocess_nhwc(img: &DynamicImage) -> Result<Array4<f32>, Box<dyn std::error::Error>> {
     // Resize quickly, convert to RGB8, then normalize to f32 NHWC: (x-127.5)/128
     // Triangle is a good balance of speed/quality vs Lanczos3.
-    let rgb = img.resize_exact(112, 112, FilterType::Triangle).to_rgb8();
-
-    let (w, h) = rgb.dimensions(); // (112, 112)
-    let raw = rgb.as_raw(); // &[u8] in RGBRGB...
+    let img = img.to_rgb8();
+    let (w, h) = img.dimensions(); // (112, 112)
+    let raw = img.as_raw(); // &[u8] in RGBRGB...
     let numel = (h as usize) * (w as usize) * 3;
     let mut data = vec![0f32; numel];
     for (i, px) in raw.chunks_exact(3).enumerate() {
@@ -67,6 +66,8 @@ fn l2_normalize(v: &mut [f32]) {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
     env_logger::init();
+    let imgs_path = std::env::var("IMG_FOLDER").unwrap_or_else(|_| "./images".to_string());
+    fs::create_dir_all(&imgs_path).await?;
 
     let client = Client::new("http://localhost:7700", Some(std::env::var("MEILI_MASTER_KEY").unwrap())).unwrap();
     let faces = client.index("faces");
@@ -115,8 +116,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match fetch_image(&client, "https://thispersondoesnotexist.com/").await {
             Ok(image_data) => {
                 match image::load_from_memory(&image_data) {
-                    Ok(decoded) => {
-                        let input = preprocess_nhwc(decoded)?;
+                    Ok(img) => {
+                        let img = img.resize_exact(112, 112, FilterType::Triangle);
+                        let input = preprocess_nhwc(&img)?;
                         let input_value = ort::value::Value::from_array(input)?;
                         let outputs = model.run(inputs!["input_1" => input_value])?;
                         let predictions = outputs["embedding"].try_extract_array::<f32>()?;
@@ -128,9 +130,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut vectors = HashMap::new();
                         vectors.insert("embedding".to_string(), Some(flat.to_vec()));
                         vectors.insert("default".to_string(), Some(flat.to_vec()));
-
+                        let id = rand::random::<u32>();
+                        img.save(format!("{imgs_path}/{id}.jpg"))?;
                         let _ = faces.add_documents(&[Face {
-                            id: rand::random(),
+                            id,
                             name: None,
                             vectors,
                             source_url: None,
