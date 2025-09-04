@@ -29,7 +29,8 @@ struct Face {
 
 pub async fn app_state(meili_url: &str, meili_key: &str, index: &str, imgs_path: impl Into<PathBuf>) -> Result<AppState, Box<dyn std::error::Error>> {
     let session = load_model().await?;
-    let client = Client::new(meili_url, Some(meili_key))?;
+    let key_opt: Option<String> = if meili_key.is_empty() { None } else { Some(meili_key.to_string()) };
+    let client = Client::new(meili_url, key_opt)?;
     let faces = client.index(index);
     Ok(AppState {
         session: Arc::new(RwLock::new(session)),
@@ -84,7 +85,7 @@ fn l2_normalize(v: &mut [f32]) {
     for x in v.iter_mut() { *x /= norm; }
 }
 
-pub async fn index(bytes: Bytes, app_state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn index(bytes: Bytes, app_state: Arc<AppState>, source_url: Option<String>, name: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     match image::load_from_memory(&bytes) {
         Ok(img) => {
             let img = img.resize_exact(112, 112, FilterType::Triangle);
@@ -106,9 +107,9 @@ pub async fn index(bytes: Bytes, app_state: Arc<AppState>) -> Result<(), Box<dyn
             img.save(format!("{img_path}/{id}.jpg"))?;
             let _ = app_state.faces.add_documents(&[Face {
                 id,
-                name: None,
+                name,
                 vectors,
-                source_url: None,
+                source_url,
                 date: Some(chrono::Utc::now().with_timezone(&Paris).to_rfc3339()),
             }], Some("id")).await?;
             info!("Embedding preview: {:?} ({} dims)", &flat[..preview_len], flat.len());

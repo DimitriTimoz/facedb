@@ -5,3 +5,22 @@ services:
       - "7700:7700"
     env_file:
       - .env
+    environment:
+      - MEILI_NO_ANALYTICS=true
+    restart: unless-stopped
+  facedb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - MEILI_HOST=http://meilisearch:7700
+      - RUST_LOG=info
+    env_file:
+      - .env
+    depends_on:
+      - meilisearch
+    restart: unless-stopped
+    volumes:
+      - ./images:/app/images
